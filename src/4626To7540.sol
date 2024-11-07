@@ -1,29 +1,39 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.15;
 
-import {IERC7540Operator, IERC7540Deposit, IERC7540Redeem} from "src/interfaces/IERC7540.sol";
-import {IERC7575, IERC165} from "src/interfaces/IERC7575.sol";
-import {ERC4626} from "solmate/mixins/ERC4626.sol";
 import {ERC20} from "solmate/tokens/ERC20.sol";
+import {ERC4626} from "solmate/mixins/ERC4626.sol";
+import {IERC7575, IERC165} from "src/interfaces/IERC7575.sol";
 import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
+import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
+import {IERC7540Operator, IERC7540Deposit, IERC7540Redeem} from "src/interfaces/IERC7540.sol";
 
 // THIS WRAPPER IS AN UNOPTIMIZED, POTENTIALLY UNSECURE REFERENCE EXAMPLE AND IN NO WAY MEANT TO BE USED IN PRODUCTION
 
+struct ClaimableDeposit {
+    uint256 assets;
+    uint256 shares;
+}
+
 contract ERC4626To7540 is ERC4626, IERC7540Operator, IERC7540Deposit {
+    using FixedPointMathLib for uint256;
+
     /// @dev Assume requests are non-fungible and all have ID = 0
     uint256 internal constant REQUEST_ID = 0;
 
     IERC7575 public immutable vault;
     ERC20 public immutable share;
 
+    mapping(address => ClaimableDeposit) internal _claimableDeposit;
+
     mapping(address => mapping(address => bool)) public isOperator;
 
     constructor(IERC7575 vault_)
-        ERC4626(vault_.asset(), ERC20(vault_.share()).name(), ERC20(vault_.share()).symbol())
+        ERC4626(ERC20(vault_.asset()), ERC20(vault_.share()).name(), ERC20(vault_.share()).symbol())
     {
         vault = vault_;
-        asset = vault_.asset();
-        share = vault_.share(); // TODO: support non-ERC7575
+        asset = ERC20(vault_.asset());
+        share = ERC20(vault_.share()); // TODO: support non-ERC7575
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -44,31 +54,43 @@ contract ERC4626To7540 is ERC4626, IERC7540Operator, IERC7540Deposit {
 
         SafeTransferLib.safeTransferFrom(asset, owner, address(this), assets);
         asset.approve(address(vault), assets);
-        vault.deposit(assets, address(this));
+        uint256 shares = vault.deposit(assets, address(this));
+
+        _claimableDeposit[controller].assets += assets;
+        _claimableDeposit[controller].shares += shares;
 
         emit DepositRequest(controller, owner, REQUEST_ID, msg.sender, assets);
         return REQUEST_ID;
     }
 
-    function pendingDepositRequest(uint256, address controller) public view virtual returns (uint256 pendingAssets) {
+    function pendingDepositRequest(uint256, address) public view virtual returns (uint256 pendingAssets) {
         pendingAssets = 0;
     }
 
-    function claimableDepositRequest(uint256, address controller)
-        public
-        view
-        virtual
-        returns (uint256 claimableAssets)
-    {
-        claimableAssets = share.balanceOf(address(this));
+    function claimableDepositRequest(uint256, address controller) public view virtual returns (uint256) {
+        return maxDeposit(controller);
+    }
+
+    function maxDeposit(address controller) public view override returns (uint256) {
+        return _claimableDeposit[controller].assets;
+    }
+
+    function maxMint(address controller) public view override returns (uint256) {
+        return _claimableDeposit[controller].shares;
     }
 
     function deposit(uint256 assets, address receiver, address controller) public virtual returns (uint256 shares) {
         require(controller == msg.sender || isOperator[controller][msg.sender], "ERC7540Vault/invalid-caller");
         require(assets != 0, "Must claim nonzero amount");
 
-        // TODO: add calculation for shares
-        shares = assets;
+        // Claiming partially introduces precision loss. The user therefore receives a rounded down amount,
+        // while the claimable balance is reduced by a rounded up amount.
+        ClaimableDeposit storage claimable = _claimableDeposit[controller];
+        shares = assets.mulDivDown(claimable.shares, claimable.assets);
+        uint256 sharesUp = assets.mulDivUp(claimable.shares, claimable.assets);
+
+        claimable.assets -= assets;
+        claimable.shares = claimable.shares > sharesUp ? claimable.shares - sharesUp : 0;
 
         share.transfer(receiver, shares);
 
@@ -84,10 +106,16 @@ contract ERC4626To7540 is ERC4626, IERC7540Operator, IERC7540Deposit {
         require(controller == msg.sender || isOperator[controller][msg.sender], "invalid-caller");
         require(shares != 0, "Must claim nonzero amount");
 
-        share.transfer(receiver, shares);
+        // Claiming partially introduces precision loss. The user therefore receives a rounded down amount,
+        // while the claimable balance is reduced by a rounded up amount.
+        ClaimableDeposit storage claimable = _claimableDeposit[controller];
+        assets = shares.mulDivDown(claimable.assets, claimable.shares);
+        uint256 assetsUp = shares.mulDivUp(claimable.assets, claimable.shares);
 
-        // TODO: add calculation for assets
-        assets = shares;
+        claimable.assets = claimable.assets > assetsUp ? claimable.assets - assetsUp : 0;
+        claimable.shares -= shares;
+
+        share.transfer(receiver, shares);
 
         emit Deposit(receiver, controller, assets, shares);
     }
@@ -119,7 +147,7 @@ contract ERC4626To7540Factory {
 
     function newWrapper(address vault) external returns (address) {
         // Salt is the destination, so every transfer proxy on every chain has the same address
-        ERC4626To7540 wrapper = new ERC4626To7540{salt: keccak256(vault)}(vault);
+        ERC4626To7540 wrapper = new ERC4626To7540{salt: keccak256(abi.encodePacked(vault))}(IERC7575(vault));
         emit NewDeployment(address(wrapper), address(vault));
         return address(wrapper);
     }
@@ -129,7 +157,7 @@ contract ERC4626To7540Factory {
             abi.encodePacked(
                 bytes1(0xff),
                 address(this),
-                keccak256(vault),
+                keccak256(abi.encodePacked(vault)),
                 keccak256(abi.encodePacked(type(ERC4626To7540).creationCode, abi.encode(vault)))
             )
         );
