@@ -8,15 +8,23 @@ import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {IERC7540Operator, IERC7540Deposit, IERC7540Redeem} from "src/interfaces/IERC7540.sol";
 
-// THIS WRAPPER IS AN UNOPTIMIZED, POTENTIALLY UNSECURE REFERENCE EXAMPLE AND IN NO WAY MEANT TO BE USED IN PRODUCTION
-
-struct ClaimableDeposit {
-    uint256 assets;
-    uint256 shares;
-}
-
+/**
+ * @notice Wrapper for managing deposits and redemptions into an ERC-4626 vault, using the ERC-7540 interface.
+ *
+ *         When requestDeposit/Redeem is called, the shares/assets received from the underlying vault are
+ *         held by the wrapper contract. These are transferred to the user when deposit/mint/redeem/withdraw
+ *         is called.
+ *
+ *  @dev   THIS WRAPPER IS AN UNOPTIMIZED, POTENTIALLY UNSECURE REFERENCE EXAMPLE
+ *         AND IN NO WAY MEANT TO BE USED IN PRODUCTION
+ */
 contract ERC4626To7540 is ERC4626, IERC7540Operator, IERC7540Deposit {
     using FixedPointMathLib for uint256;
+
+    struct ClaimableDeposit {
+        uint256 assets;
+        uint256 shares;
+    }
 
     /// @dev Assume requests are non-fungible and all have ID = 0
     uint256 internal constant REQUEST_ID = 0;
@@ -39,6 +47,7 @@ contract ERC4626To7540 is ERC4626, IERC7540Operator, IERC7540Deposit {
     /*//////////////////////////////////////////////////////////////
                        ERC7540 DEPOSIT LOGIC
     //////////////////////////////////////////////////////////////*/
+
     function totalAssets() public view virtual override returns (uint256) {
         return vault.totalAssets();
     }
@@ -142,6 +151,9 @@ contract ERC4626To7540 is ERC4626, IERC7540Operator, IERC7540Deposit {
     }
 }
 
+/**
+ * @notice Deterministic factory for ERC-4626-to-7540 wrapper contracts.
+ */
 contract ERC4626To7540Factory {
     event NewDeployment(address indexed wrapper, address indexed vault);
 
